@@ -1,13 +1,14 @@
 import cv2
 import numpy
 import time
-import configparser
+#import configparser
 import picamera
+import picamera.array
 import RPi.GPIO as GPIO
 
 
 class PID:
-    def __init__(self, p=1, i=0, d=0):
+    def __init__(self, p=0, i=0, d=0):
         # initialize gains
         self.kP = p
         self.kI = i
@@ -84,68 +85,91 @@ def face_detection(face_cascade, img):
     return face_x, face_y
 
 
-def set_servos(pan_ctrl, tilt_ctrl):
-    pass
-
-
 def object_centered(obj_coord, img_coord):
     tol = 20
     return numpy.sqrt((img_coord[0]-obj_coord[0])**2+(img_coord[1]-obj_coord[1])**2) <= tol
 
 
-def process(pan_params, tilt_params):
+def px2duty(px_error, center_pixel, min_angle, max_angle,min_duty,max_duty):
+	deg_error = numpy.interp(px_error, [-center_pixel,center_pixel],[min_angle, max_angle])
+	return numpy.interp(deg_error, [min_angle,max_angle],[min_duty, max_duty])
+
+
+def process():
     # create a PID and initialize it
-    pan_pid = PID(pan_params[0], pan_params[1], pan_params[2])
-    tilt_pid = PID(tilt_params[0], tilt_params[1], tilt_params[2])
+    pan_pid = PID(0,0,0)
+    tilt_pid = PID(2,0,0)
 
     # load Haar cascade object
     face_cascade = cv2.CascadeClassifier('haarcascade_frontalface_default.xml')
 
     with picamera.PiCamera() as camera:
         time.sleep(2)
+	camera.rotation = 180
         with picamera.array.PiRGBArray(camera) as img:
             # loop indefinitely
             while True:
-                camera.capture(img, format='rgb')
-                face_x, face_y = face_detection(face_cascade, img)
+                camera.start_preview()
+		camera.capture(img, format='rgb')
+                face_x, face_y = face_detection(face_cascade, img.array)
 
                 # Read the input image
-                height, width, channels = img.shape
+                height, width, channels = img.array.shape
                 img_x, img_y = (width // 2, height // 2)
-
+		print(img_x-face_x,img_y-face_y)
                 # calculate the error
-                pan_error = img_x - face_x
-                tilt_error = img_y - face_y
+                pan_error = px2deg(img_x-face_x,img_x,-45,45)
+                tilt_error = px2deg(img_y-face_y, img_y, -45,45)
+		print(pan_error,tilt_error)
 
                 # update the control values
                 pan_ctrl = pan_pid.update(pan_error)
                 tilt_ctrl = tilt_pid.update(tilt_error)
-
+		print(pan_ctrl,tilt_ctrl)
                 # update servo target
-                set_servos(pan_ctrl, tilt_ctrl)
+		pan_ctrl = numpy.clip(pan_ctrl,PAN_LEFT, PAN_RIGHT)
+                tilt_ctrl = numpy.clip(tilt_ctrl, TILT_UP, TILT_DOWN)
+		
+		# set servos
+		#pwm_pan.ChangeDutyCycle(pan_ctrl)
+		#pwm_tilt.ChangeDutyCycle(tilt_ctrl)
+		time.sleep(3) # Allow servos to move
+		camera.stop_preview()
+		camera.close()
+		break
 
+if __name__ == "__main__":
+	#config = configparser.ConfigParser()
+	#config.read('config.ini')
+	#x = config['LIMITS']['...']
+	#y = config['PID']['...']
 
-config = configparser.ConfigParser()
-config.read('config.ini')
-x = config['LIMITS']['...']
-y = config['PID']['...']
+	TILT_PIN = 18    # RPi GPIO
+	#PAN_PIN = 13     # RPi GPIO
 
-TILT_PIN = 0    # RPi GPIO
-PAN_PIN = 0     # RPi GPIO
+	# Calibration params
+	PAN_LEFT = 2.0
+	PAN_CENTER = 4.4
+	PAN_RIGHT = 7.0
 
-# Calibration params
-PAN_LEFT = 0
-PAN_RIGHT = 0
+	TILT_DOWN = 6
+	TILT_CENTER = 3.5
+	TILT_UP = 1.75
 
-TILT_DOWN = 0
-TILT_UP = 0
+	FREQ = 50
 
-GPIO.setmode(GPIO.BCM)
-GPIO.setup(TILT_PIN, GPIO.OUT)
-GPIO.setup(PAN_PIN, GPIO.OUT)
+	GPIO.setmode(GPIO.BCM)
+	GPIO.setup(TILT_PIN, GPIO.OUT)
+	#GPIO.setup(PAN_PIN, GPIO.OUT)
 
-pwm_tilt = GPIO.PWM(TILT_PIN, 50)  # Tilt pin at 50 Hz
-pwm_pan = GPIO.PWM(PAN_PIN, 50)
+	pwm_tilt = GPIO.PWM(TILT_PIN, FREQ)
+	#pwm_pan = GPIO.PWM(PAN_PIN, FREQ)
 
-#pwm.stop()
-#GPIO.cleanup()
+	pwm_tilt.start(0)
+	#pwm_pan.start(0)
+	time.sleep(2)
+	
+	process()
+	pwm_tilt.stop()
+	#pwm_pan.stop()
+	GPIO.cleanup()
